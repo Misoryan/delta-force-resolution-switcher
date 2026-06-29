@@ -1,0 +1,11 @@
+{
+  "target_width": 1920,
+  "target_height": 1080,
+  "poll_interval_seconds": 2,
+  "process_names": [
+    "DeltaForceClient-Win64-Shipping.exe",
+    "DeltaForce.exe"
+  ],
+  "startup_delay_seconds": 3,
+  "active_poll_interval_seconds": 0.3
+}

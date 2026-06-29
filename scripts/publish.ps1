@@ -14,11 +14,12 @@ taskkill /IM DeltaResolutionSwitcher.exe /F 2>$null | Out-Null
 python -m pip install -r requirements.txt pyinstaller -q
 python -m PyInstaller DeltaResolutionSwitcher.spec --noconfirm --clean
 Copy-Item -Force config.json dist\config.json
+Copy-Item -Recurse -Force assets dist\assets
 
 $zipName = "DeltaResolutionSwitcher-$Version.zip"
 $zipPath = Join-Path "release" $zipName
 New-Item -ItemType Directory -Force -Path release | Out-Null
-Compress-Archive -Path dist\DeltaResolutionSwitcher.exe, dist\config.json `
+Compress-Archive -Path dist\DeltaResolutionSwitcher.exe, dist\config.json, dist\assets `
     -DestinationPath $zipPath -Force
 
 Write-Host "Creating git tag $Version..."

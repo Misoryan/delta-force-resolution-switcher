@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 
@@ -224,13 +225,20 @@ def recover_from_crash(process_names: list[str]) -> None:
 
 
 class ResolutionSwitcher:
-    def __init__(self, config: dict, stop_event: threading.Event | None = None) -> None:
+    def __init__(
+        self,
+        config: dict,
+        stop_event: threading.Event | None = None,
+        on_notify: Callable[[str, str], None] | None = None,
+    ) -> None:
         self.config = config
         self.game_active = False
         self.saved_resolution: dict | None = None
         self.pending_switch = False
         self.switch_at: float = 0.0
         self.stop_event = stop_event or threading.Event()
+        self.on_notify = on_notify
+        self._notifications_enabled = config.get("enable_notifications", True)
 
     @property
     def process_names(self) -> list[str]:
@@ -251,6 +259,13 @@ class ResolutionSwitcher:
     def active_poll_interval(self) -> float:
         return float(self.config.get("active_poll_interval_seconds", 0.3))
 
+    def _notify(self, title: str, message: str) -> None:
+        if self.on_notify and self._notifications_enabled:
+            try:
+                self.on_notify(title, message)
+            except Exception:
+                logging.debug("发送系统通知时出错，已忽略。", exc_info=True)
+
     def switch_to_game_resolution(self) -> None:
         current = get_current_devmode()
         if not current:
@@ -262,6 +277,10 @@ class ResolutionSwitcher:
 
         if self.saved_resolution["width"] == target_w and self.saved_resolution["height"] == target_h:
             logging.info("当前已是 %dx%d，仅记录原状态以便退出时保持一致。", target_w, target_h)
+            self._notify(
+                "三角洲行动分辨率监视器",
+                f"当前已是目标分辨率 {target_w}x{target_h}",
+            )
         else:
             logging.info(
                 "游戏已启动，切换分辨率: %dx%d -> %dx%d",
@@ -278,6 +297,10 @@ class ResolutionSwitcher:
             )
             if result == DISP_CHANGE_SUCCESSFUL:
                 logging.info("分辨率切换成功。")
+                self._notify(
+                    "三角洲行动分辨率监视器",
+                    f"分辨率已切换至 {target_w}x{target_h}",
+                )
             elif result == DISP_CHANGE_RESTART:
                 logging.warning("分辨率切换需要重启系统才能生效。")
             else:
@@ -302,6 +325,10 @@ class ResolutionSwitcher:
         result = restore_from_saved(self.saved_resolution)
         if result == DISP_CHANGE_SUCCESSFUL:
             logging.info("分辨率已恢复。")
+            self._notify(
+                "三角洲行动分辨率监视器",
+                f"分辨率已恢复至 {self.saved_resolution['width']}x{self.saved_resolution['height']}",
+            )
         elif result == DISP_CHANGE_RESTART:
             logging.warning("恢复分辨率需要重启系统才能生效。")
         else:

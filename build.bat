@@ -13,11 +13,16 @@ echo Building DeltaResolutionSwitcher.exe ...
 python -m PyInstaller DeltaResolutionSwitcher.spec --noconfirm --clean
 if errorlevel 1 exit /b 1
 
-if not exist "dist\config.json" copy /Y "config.json" "dist\config.json" >nul
+:: 始终用源代码目录中的最新 config.json 覆盖 dist 中的副本
+copy /Y "config.json" "dist\config.json" >nul
+:: 复制图标资源文件夹
+if exist "dist\assets" rmdir /S /Q "dist\assets"
+xcopy /E /Y /I "assets" "dist\assets" >nul
 
 echo.
 echo Done: dist\DeltaResolutionSwitcher.exe
 echo       dist\config.json
+echo       dist\assets\
 echo.
 pause
 endlocal

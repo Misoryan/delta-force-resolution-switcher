@@ -6,10 +6,12 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
@@ -31,12 +33,25 @@ from delta_resolution_switcher import (
 )
 
 APP_DIR = get_app_dir()
+ASSETS_DIR = APP_DIR / "assets"
 STARTUP_DIR = Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
 STARTUP_LNK = STARTUP_DIR / "DeltaForceResolutionSwitcher.lnk"
 LOG_FILE = STATE_DIR / "switcher.log"
 UI_FONT = "Microsoft YaHei UI"
 BASE_DPI = 96.0
 BASE_FONT_PX = 14
+
+
+def _load_asset(name: str) -> Image.Image:
+    """加载资源文件（兼容开发模式和 PyInstaller 打包模式）。"""
+    path = ASSETS_DIR / name
+    if path.exists():
+        return Image.open(path)
+    # PyInstaller 打包后，资源由 spec 的 datas 复制到 exe 同目录
+    fallback = APP_DIR / name
+    if fallback.exists():
+        return Image.open(fallback)
+    raise FileNotFoundError(f"找不到资源文件: {name}")
 
 
 def get_system_dpi() -> float:
@@ -78,6 +93,7 @@ DEFAULT_CONFIG = {
     ],
     "startup_delay_seconds": 3,
     "active_poll_interval_seconds": 0.3,
+    "enable_notifications": True,
 }
 
 
@@ -129,10 +145,11 @@ class AppStatus:
 
 
 class MonitorService:
-    def __init__(self) -> None:
+    def __init__(self, notify_queue: queue.Queue | None = None) -> None:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
+        self._notify_queue = notify_queue
 
     def is_running(self) -> bool:
         with self._lock:
@@ -156,6 +173,19 @@ class MonitorService:
         with self._lock:
             self._thread = None
 
+    def _make_notify_callback(self) -> Callable[[str, str], None] | None:
+        q = self._notify_queue
+        if q is None:
+            return None
+
+        def _on_notify(title: str, message: str) -> None:
+            try:
+                q.put_nowait((title, message))
+            except queue.Full:
+                pass
+
+        return _on_notify
+
     def _run(self) -> None:
         setup_logging(console=False)
         try:
@@ -165,7 +195,11 @@ class MonitorService:
 
             logging.error("找不到配置文件: %s", CONFIG_FILE)
             return
-        ResolutionSwitcher(config, stop_event=self._stop_event).run()
+        ResolutionSwitcher(
+            config,
+            stop_event=self._stop_event,
+            on_notify=self._make_notify_callback(),
+        ).run()
 
 
 def save_config(config: dict) -> None:
@@ -254,17 +288,13 @@ def collect_status(monitor: MonitorService) -> AppStatus:
     return status
 
 
-def make_icon(color: str) -> Image.Image:
-    size = 64
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    draw.ellipse((8, 8, size - 8, size - 8), fill=color)
-    return image
-
-
-ICON_STOPPED = make_icon("#9E9E9E")
-ICON_IDLE = make_icon("#43A047")
-ICON_ACTIVE = make_icon("#FB8C00")
+def load_tray_icons() -> dict[str, Image.Image]:
+    """加载三种状态的托盘图标。"""
+    return {
+        "idle": _load_asset("tray_idle.png"),
+        "active": _load_asset("tray_active.png"),
+        "stopped": _load_asset("tray_stopped.png"),
+    }
 
 
 class SettingsWindow:
@@ -273,6 +303,7 @@ class SettingsWindow:
         self.window: tk.Toplevel | None = None
         self.status_labels: dict[str, ttk.Label] = {}
         self.fields: dict[str, tk.Variable] = {}
+        self.enable_notifications_var = tk.BooleanVar()
 
     def show(self) -> None:
         if self.window is not None and self.window.winfo_exists():
@@ -342,6 +373,11 @@ class SettingsWindow:
         ttk.Entry(grid, textvariable=self.fields["active_poll_interval_seconds"], width=10).grid(row=1, column=3, sticky=tk.W)
         ttk.Label(grid, text="空闲检测(秒)").grid(row=2, column=0, sticky=tk.W, pady=4)
         ttk.Entry(grid, textvariable=self.fields["poll_interval_seconds"], width=10).grid(row=2, column=1, sticky=tk.W)
+        ttk.Checkbutton(
+            grid,
+            text="分辨率切换时发送系统通知",
+            variable=self.enable_notifications_var,
+        ).grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(8, 4))
 
         ttk.Label(config_frame, text="监视进程名（每行一个）").pack(anchor=tk.W, pady=(10, 4))
         process_box = scrolledtext.ScrolledText(config_frame, height=5, wrap=tk.WORD, font=self.app.ui_font)
@@ -386,6 +422,7 @@ class SettingsWindow:
         self.fields["startup_delay_seconds"].set(str(config.get("startup_delay_seconds", 3)))
         self.fields["active_poll_interval_seconds"].set(str(config.get("active_poll_interval_seconds", 0.3)))
         self.fields["poll_interval_seconds"].set(str(config.get("poll_interval_seconds", 2)))
+        self.enable_notifications_var.set(config.get("enable_notifications", True))
 
     def refresh_status(self) -> None:
         status = collect_status(self.app.monitor)
@@ -428,6 +465,7 @@ class SettingsWindow:
                 "startup_delay_seconds": float(self.fields["startup_delay_seconds"].get().strip()),
                 "active_poll_interval_seconds": float(self.fields["active_poll_interval_seconds"].get().strip()),
                 "poll_interval_seconds": float(self.fields["poll_interval_seconds"].get().strip()),
+                "enable_notifications": self.enable_notifications_var.get(),
                 "process_names": [
                     line.strip()
                     for line in self.process_box.get("1.0", tk.END).splitlines()
@@ -458,11 +496,14 @@ class TrayApplication:
         self.root.withdraw()
         self.root.title("三角洲行动分辨率监视器")
 
-        self.monitor = MonitorService()
+        self._notify_queue: queue.Queue = queue.Queue(maxsize=16)
+        self.monitor = MonitorService(notify_queue=self._notify_queue)
         self.settings = SettingsWindow(self)
+        self.icons = load_tray_icons()
         self.icon: pystray.Icon | None = None
         self._build_tray()
         self._schedule_poll()
+        self._schedule_notify_check()
 
     def _create_tray_menu(self) -> pystray.Menu:
         items: list[pystray.MenuItem | pystray.Menu] = [
@@ -489,7 +530,7 @@ class TrayApplication:
     def _build_tray(self) -> None:
         self.icon = pystray.Icon(
             "delta_resolution_switcher",
-            ICON_STOPPED,
+            self.icons["stopped"],
             "三角洲分辨率监视器 - 未运行",
             self._create_tray_menu(),
         )
@@ -498,14 +539,27 @@ class TrayApplication:
         self.update_tray()
         self.root.after(1500, self._schedule_poll)
 
+    def _schedule_notify_check(self) -> None:
+        self._check_notifications()
+        self.root.after(500, self._schedule_notify_check)
+
+    def _check_notifications(self) -> None:
+        try:
+            while True:
+                title, message = self._notify_queue.get_nowait()
+                if self.icon is not None:
+                    self.icon.notify(message, title)
+        except queue.Empty:
+            pass
+
     def update_tray(self) -> None:
         status = collect_status(self.monitor)
         if not status.monitor_running:
-            icon, title = ICON_STOPPED, "三角洲分辨率监视器 - 未运行"
+            icon, title = self.icons["stopped"], "三角洲分辨率监视器 - 未运行"
         elif status.session_active:
-            icon, title = ICON_ACTIVE, "三角洲分辨率监视器 - 游戏中"
+            icon, title = self.icons["active"], "三角洲分辨率监视器 - 游戏中"
         else:
-            icon, title = ICON_IDLE, "三角洲分辨率监视器 - 监视中"
+            icon, title = self.icons["idle"], "三角洲分辨率监视器 - 监视中"
         if self.icon is not None:
             self.icon.icon = icon
             self.icon.title = title
